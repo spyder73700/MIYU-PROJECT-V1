@@ -38,6 +38,11 @@ const userSchema = new mongoose.Schema({
     enum: ['admin', 'pharmacist', 'manager', 'writer'],
     default: 'pharmacist'
   },
+  parentAdmin: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false
+  },
   createdAt: {
     type: Date,
     default: Date.now

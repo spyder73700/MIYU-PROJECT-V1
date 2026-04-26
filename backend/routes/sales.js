@@ -1,16 +1,36 @@
 const express = require('express');
-const router = express.Router();
 const mongoose = require('mongoose');
+const router = express.Router();
 const Sale = require('../models/Sale');
 const Purchase = require('../models/Purchase');
 const Inventory = require('../models/Inventory');
 const Category = require('../models/Category');
+const User = require('../models/User');
 const authMiddleware = require('../middleware/auth');
+
+// Helper function to get all user IDs accessible by the current user
+async function getAccessibleUserIds(userId, userRole) {
+  const accessibleIds = [new mongoose.Types.ObjectId(userId)];
+  
+  if (['admin', 'pharmacist', 'manager'].includes(userRole)) {
+    // Get all writers created by this admin
+    const writers = await User.find({ 
+      parentAdmin: userId,
+      role: 'writer'
+    }).select('_id');
+    
+    const writerIds = writers.map(writer => writer._id);
+    accessibleIds.push(...writerIds);
+  }
+  
+  return accessibleIds;
+}
 
 // Get all sales
 router.get('/', authMiddleware, async (req, res) => {
   try {
-    const sales = await Sale.find({ createdBy: req.user.userId })
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
+    const sales = await Sale.find({ createdBy: { $in: accessibleUserIds } })
       .sort({ saleDate: -1 });
     res.json(sales);
   } catch (error) {
@@ -21,8 +41,9 @@ router.get('/', authMiddleware, async (req, res) => {
 // Get categories for sales dropdown
 router.get('/categories', authMiddleware, async (req, res) => {
   try {
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const categories = await Inventory.aggregate([
-      { $match: { createdBy: new mongoose.Types.ObjectId(req.user.userId), quantity: { $gt: 0 } } },
+      { $match: { createdBy: { $in: accessibleUserIds }, quantity: { $gt: 0 } } },
       {
         $group: {
           _id: '$category',
@@ -51,11 +72,12 @@ router.get('/categories', authMiddleware, async (req, res) => {
 router.get('/medicines/:category', authMiddleware, async (req, res) => {
   try {
     const category = req.params.category;
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     
     const medicines = await Inventory.aggregate([
       { 
         $match: { 
-          createdBy: new mongoose.Types.ObjectId(req.user.userId), 
+          createdBy: { $in: accessibleUserIds }, 
           category: category,
           quantity: { $gt: 0 }
         } 
@@ -89,9 +111,10 @@ router.get('/suppliers/:medicineName', authMiddleware, async (req, res) => {
   try {
     const medicineName = req.params.medicineName;
     const { category } = req.query;
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     
     const matchQuery = {
-      createdBy: new mongoose.Types.ObjectId(req.user.userId),
+      createdBy: { $in: accessibleUserIds },
       medicineName: { $regex: new RegExp('^' + medicineName + '$', 'i') },
       quantity: { $gt: 0 }
     };
@@ -131,9 +154,10 @@ router.get('/batches/:medicineName', authMiddleware, async (req, res) => {
   try {
     const medicineName = req.params.medicineName;
     const { supplier, category } = req.query;
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     
     const query = {
-      createdBy: req.user.userId,
+      createdBy: { $in: accessibleUserIds },
       medicineName: { $regex: new RegExp('^' + medicineName + '$', 'i') },
       quantity: { $gt: 0 }
     };
@@ -183,8 +207,9 @@ router.post('/', authMiddleware, async (req, res) => {
     const totalAmount = quantity * unitPrice;
     
     // Find the purchase price for this medicine (most recent purchase matching batch)
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const purchase = await Purchase.findOne({ 
-      createdBy: req.user.userId,
+      createdBy: { $in: accessibleUserIds },
       medicineName: { $regex: new RegExp('^' + medicineName + '$', 'i') },
       supplier: { $regex: new RegExp('^' + supplier + '$', 'i') },
       batchNumber: { $regex: new RegExp('^' + batchNumber + '$', 'i') }
@@ -196,7 +221,7 @@ router.post('/', authMiddleware, async (req, res) => {
     // Find the specific inventory item by ID
     const inventoryItem = await Inventory.findOne({
       _id: inventoryId,
-      createdBy: req.user.userId
+      createdBy: { $in: accessibleUserIds }
     });
     
     if (!inventoryItem) {
@@ -251,9 +276,10 @@ router.post('/', authMiddleware, async (req, res) => {
 // Get sale by ID
 router.get('/:id', authMiddleware, async (req, res) => {
   try {
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const sale = await Sale.findOne({
       _id: req.params.id,
-      createdBy: req.user.userId
+      createdBy: { $in: accessibleUserIds }
     });
     
     if (!sale) {
@@ -269,6 +295,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
 // Update sale
 router.put('/:id', authMiddleware, async (req, res) => {
   try {
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const { medicineName, customerName, quantity, unitPrice, saleDate, prescriptionNumber, doctorName, paymentMethod, notes } = req.body;
     
     const updateData = {
@@ -288,7 +315,7 @@ router.put('/:id', authMiddleware, async (req, res) => {
     }
     
     const sale = await Sale.findOneAndUpdate(
-      { _id: req.params.id, createdBy: req.user.userId },
+      { _id: req.params.id, createdBy: { $in: accessibleUserIds } },
       updateData,
       { new: true }
     );
@@ -306,9 +333,10 @@ router.put('/:id', authMiddleware, async (req, res) => {
 // Delete sale
 router.delete('/:id', authMiddleware, async (req, res) => {
   try {
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const sale = await Sale.findOneAndDelete({
       _id: req.params.id,
-      createdBy: req.user.userId
+      createdBy: { $in: accessibleUserIds }
     });
     
     if (!sale) {

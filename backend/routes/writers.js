@@ -27,7 +27,7 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(403).json({ message: 'Admin access required' });
     }
 
-    const { username, password, email } = req.body;
+    const { username, email, password } = req.body;
 
     // Auto-generate email if not provided
     const writerEmail = email || `${username.toLowerCase().replace(/\s+/g, '.')}@miyu.com`;
@@ -41,12 +41,13 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(400).json({ message: 'Writer with this username already exists' });
     }
 
-    // Create new writer
+    // Create new writer with parentAdmin link
     const writer = new User({
       username,
       email: writerEmail,
       password,
-      role: 'writer'
+      role: 'writer',
+      parentAdmin: req.user.userId // Link to the admin who created this writer
     });
 
     await writer.save();

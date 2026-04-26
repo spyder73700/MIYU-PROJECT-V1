@@ -5,46 +5,65 @@ const Purchase = require('../models/Purchase');
 const Sale = require('../models/Sale');
 const Inventory = require('../models/Inventory');
 const Supplier = require('../models/Supplier');
+const User = require('../models/User');
 const authMiddleware = require('../middleware/auth');
+
+// Helper function to get all user IDs accessible by the current user
+async function getAccessibleUserIds(userId, userRole) {
+  const accessibleIds = [new mongoose.Types.ObjectId(userId)];
+  
+  if (['admin', 'pharmacist', 'manager'].includes(userRole)) {
+    // Get all writers created by this admin
+    const writers = await User.find({ 
+      parentAdmin: userId,
+      role: 'writer'
+    }).select('_id');
+    
+    const writerIds = writers.map(writer => writer._id);
+    accessibleIds.push(...writerIds);
+  }
+  
+  return accessibleIds;
+}
 
 // Get dashboard statistics
 router.get('/stats', authMiddleware, async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId);
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     
     // Total purchases
     const totalPurchases = await Purchase.aggregate([
-      { $match: { createdBy: userId } },
+      { $match: { createdBy: { $in: accessibleUserIds } } },
       { $group: { _id: null, total: { $sum: '$totalAmount' } } }
     ]);
     
     // Total sales
     const totalSales = await Sale.aggregate([
-      { $match: { createdBy: userId } },
+      { $match: { createdBy: { $in: accessibleUserIds } } },
       { $group: { _id: null, total: { $sum: '$totalAmount' } } }
     ]);
     
     // Purchase count
-    const purchaseCount = await Purchase.countDocuments({ createdBy: userId });
+    const purchaseCount = await Purchase.countDocuments({ createdBy: { $in: accessibleUserIds } });
     
     // Sale count
-    const saleCount = await Sale.countDocuments({ createdBy: userId });
+    const saleCount = await Sale.countDocuments({ createdBy: { $in: accessibleUserIds } });
     
     // Today's sales
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todaySales = await Sale.aggregate([
-      { $match: { createdBy: userId, saleDate: { $gte: today } } },
+      { $match: { createdBy: { $in: accessibleUserIds }, saleDate: { $gte: today } } },
       { $group: { _id: null, total: { $sum: '$totalAmount' } } }
     ]);
     
     // Recent purchases
-    const recentPurchases = await Purchase.find({ createdBy: userId })
+    const recentPurchases = await Purchase.find({ createdBy: { $in: accessibleUserIds } })
       .sort({ createdAt: -1 })
       .limit(5);
     
     // Recent sales
-    const recentSales = await Sale.find({ createdBy: userId })
+    const recentSales = await Sale.find({ createdBy: { $in: accessibleUserIds } })
       .sort({ createdAt: -1 })
       .limit(5);
     
@@ -53,7 +72,7 @@ router.get('/stats', authMiddleware, async (req, res) => {
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
     
     const monthlySales = await Sale.aggregate([
-      { $match: { createdBy: userId, saleDate: { $gte: sixMonthsAgo } } },
+      { $match: { createdBy: { $in: accessibleUserIds }, saleDate: { $gte: sixMonthsAgo } } },
       {
         $group: {
           _id: {
@@ -67,28 +86,28 @@ router.get('/stats', authMiddleware, async (req, res) => {
     ]);
 
     // Inventory stats - REAL TIME
-    const inventoryCount = await Inventory.countDocuments({ createdBy: userId });
+    const inventoryCount = await Inventory.countDocuments({ createdBy: { $in: accessibleUserIds } });
     
     // Low stock items (quantity < 10) - REAL TIME
     const lowStockItems = await Inventory.find({ 
-      createdBy: userId,
+      createdBy: { $in: accessibleUserIds },
       quantity: { $lt: 10 }
     }).sort({ quantity: 1 }).limit(10);
 
     // Short items count (quantity < 10)
     const shortItemsCount = await Inventory.countDocuments({
-      createdBy: userId,
+      createdBy: { $in: accessibleUserIds },
       quantity: { $lt: 10 }
     });
 
     // Total profit - sum of (salePrice - purchasePrice) * quantity from all sales
     const totalProfit = await Sale.aggregate([
-      { $match: { createdBy: userId } },
+      { $match: { createdBy: { $in: accessibleUserIds } } },
       { $group: { _id: null, total: { $sum: '$profit' } } }
     ]);
     
     // Active suppliers with pending amounts - REAL TIME
-    const suppliers = await Supplier.find({ createdBy: userId })
+    const suppliers = await Supplier.find({ createdBy: { $in: accessibleUserIds } })
       .sort({ pendingAmount: -1 })
       .limit(5);
     
@@ -119,18 +138,18 @@ router.get('/stats', authMiddleware, async (req, res) => {
 // Get financial report with date filtering
 router.get('/financial-report', authMiddleware, async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId);
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const { startDate, endDate } = req.query;
     
     // Build date filter
-    const dateFilter = { createdBy: userId };
+    const dateFilter = { createdBy: { $in: accessibleUserIds } };
     if (startDate || endDate) {
       dateFilter.saleDate = {};
       if (startDate) dateFilter.saleDate.$gte = new Date(startDate);
       if (endDate) dateFilter.saleDate.$lte = new Date(endDate);
     }
 
-    const purchaseDateFilter = { createdBy: userId };
+    const purchaseDateFilter = { createdBy: { $in: accessibleUserIds } };
     if (startDate || endDate) {
       purchaseDateFilter.purchaseDate = {};
       if (startDate) purchaseDateFilter.purchaseDate.$gte = new Date(startDate);
@@ -252,7 +271,7 @@ router.get('/financial-report', authMiddleware, async (req, res) => {
 
     // Inventory valuation (current stock value)
     const inventoryValuation = await Inventory.aggregate([
-      { $match: { createdBy: userId } },
+      { $match: { createdBy: { $in: accessibleUserIds } } },
       {
         $group: {
           _id: null,

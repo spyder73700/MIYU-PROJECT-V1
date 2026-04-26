@@ -1,14 +1,45 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 const Purchase = require('../models/Purchase');
 const Inventory = require('../models/Inventory');
 const Category = require('../models/Category');
+const User = require('../models/User');
 const authMiddleware = require('../middleware/auth');
+
+// Helper function to get all user IDs accessible by the current user
+async function getAccessibleUserIds(userId, userRole) {
+  const accessibleIds = [new mongoose.Types.ObjectId(userId)];
+  
+  if (['admin', 'pharmacist', 'manager'].includes(userRole)) {
+    // Get all writers created by this admin
+    const writers = await User.find({ 
+      parentAdmin: userId,
+      role: 'writer'
+    }).select('_id');
+    
+    const writerIds = writers.map(writer => writer._id);
+    accessibleIds.push(...writerIds);
+  }
+  
+  return accessibleIds;
+}
+
+// Helper function to get the correct owner ID for inventory creation
+async function getInventoryOwnerId(userId, userRole) {
+  if (userRole === 'writer') {
+    // For writers, get their parent admin's ID
+    const writer = await User.findById(userId);
+    return writer.parentAdmin || userId; // Fallback to writer's own ID if no parent admin
+  }
+  return userId; // For admins and others, use their own ID
+}
 
 // Get all purchases
 router.get('/', authMiddleware, async (req, res) => {
   try {
-    const purchases = await Purchase.find({ createdBy: req.user.userId })
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
+    const purchases = await Purchase.find({ createdBy: { $in: accessibleUserIds } })
       .sort({ purchaseDate: -1 });
     res.json(purchases);
   } catch (error) {
@@ -56,10 +87,14 @@ router.post('/', authMiddleware, async (req, res) => {
       console.log('=== INVENTORY UPDATE START ===');
       console.log('Input:', { category, medicineName, supplier, batchNumber, quantity, expiryDate });
       
+      // Get the correct owner ID for inventory creation
+      const inventoryOwnerId = await getInventoryOwnerId(req.user.userId, req.user.role);
+      console.log('Inventory owner ID:', inventoryOwnerId, 'User role:', req.user.role);
+      
       // Step 1: Find or create Category (case-insensitive)
       console.log('Step 1: Looking for category:', category);
       let categoryDoc = await Category.findOne({
-        createdBy: req.user.userId,
+        createdBy: inventoryOwnerId,
         name: { $regex: new RegExp('^' + category + '$', 'i') }
       });
 
@@ -67,7 +102,7 @@ router.post('/', authMiddleware, async (req, res) => {
         console.log('Category NOT found, creating new:', category);
         categoryDoc = new Category({
           name: category,
-          createdBy: req.user.userId,
+          createdBy: inventoryOwnerId,
           medicines: []
         });
       } else {
@@ -135,7 +170,7 @@ router.post('/', authMiddleware, async (req, res) => {
       console.log('Search criteria:', { medicineName, supplier, batchNumber, expiryDate: expiryDateObj });
       
       const existingInventory = await Inventory.findOne({
-        createdBy: req.user.userId,
+        createdBy: inventoryOwnerId,
         medicineName: { $regex: new RegExp('^' + medicineName + '$', 'i') },
         supplier: { $regex: new RegExp('^' + supplier + '$', 'i') },
         batchNumber: { $regex: new RegExp('^' + batchNumber + '$', 'i') },
@@ -158,7 +193,7 @@ router.post('/', authMiddleware, async (req, res) => {
           quantity: Number(quantity),
           expiryDate: expiryDateObj,
           purchaseId: purchase._id,
-          createdBy: req.user.userId
+          createdBy: inventoryOwnerId
         });
         
         try {
@@ -187,9 +222,10 @@ router.post('/', authMiddleware, async (req, res) => {
 // Get purchase by ID
 router.get('/:id', authMiddleware, async (req, res) => {
   try {
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const purchase = await Purchase.findOne({
       _id: req.params.id,
-      createdBy: req.user.userId
+      createdBy: { $in: accessibleUserIds }
     });
     
     if (!purchase) {
@@ -205,6 +241,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
 // Update purchase
 router.put('/:id', authMiddleware, async (req, res) => {
   try {
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const { medicineName, supplier, quantity, unitPrice, mrp, paymentStatus, purchaseDate, expiryDate, batchNumber, notes } = req.body;
     
     const updateData = {
@@ -225,7 +262,7 @@ router.put('/:id', authMiddleware, async (req, res) => {
     }
     
     const purchase = await Purchase.findOneAndUpdate(
-      { _id: req.params.id, createdBy: req.user.userId },
+      { _id: req.params.id, createdBy: { $in: accessibleUserIds } },
       updateData,
       { new: true }
     );
@@ -243,9 +280,10 @@ router.put('/:id', authMiddleware, async (req, res) => {
 // Delete purchase
 router.delete('/:id', authMiddleware, async (req, res) => {
   try {
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const purchase = await Purchase.findOneAndDelete({
       _id: req.params.id,
-      createdBy: req.user.userId
+      createdBy: { $in: accessibleUserIds }
     });
     
     if (!purchase) {

@@ -3,12 +3,37 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const Inventory = require('../models/Inventory');
 const Purchase = require('../models/Purchase');
+const User = require('../models/User');
 const auth = require('../middleware/auth');
+
+// Helper function to get all user IDs accessible by the current user
+async function getAccessibleUserIds(userId, userRole) {
+  const accessibleIds = [new mongoose.Types.ObjectId(userId)];
+  
+  if (['admin', 'pharmacist', 'manager'].includes(userRole)) {
+    // Get all writers created by this admin
+    const writers = await User.find({ 
+      parentAdmin: userId,
+      role: 'writer'
+    }).select('_id');
+    
+    const writerIds = writers.map(writer => writer._id);
+    accessibleIds.push(...writerIds);
+  }
+  
+  return accessibleIds;
+}
 
 // Get all inventory items
 router.get('/', auth, async (req, res) => {
   try {
-    const items = await Inventory.find({ createdBy: req.user.userId }).sort({ createdAt: -1 });
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
+    const items = await Inventory.find({ createdBy: { $in: accessibleUserIds } }).sort({ createdAt: -1 });
     res.json(items);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -18,10 +43,16 @@ router.get('/', auth, async (req, res) => {
 // Search inventory by medicineName, category, supplier, batchNumber
 router.get('/search', auth, async (req, res) => {
   try {
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
     const { medicineName, category, supplier, batchNumber } = req.query;
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     
     // Build query dynamically
-    const query = { createdBy: req.user.userId };
+    const query = { createdBy: { $in: accessibleUserIds } };
     
     if (medicineName) {
       query.medicineName = { $regex: new RegExp(medicineName, 'i') };
@@ -46,10 +77,15 @@ router.get('/search', auth, async (req, res) => {
 // Get hierarchical categories with counts
 router.get('/categories', auth, async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId);
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     
     const categories = await Inventory.aggregate([
-      { $match: { createdBy: userId } },
+      { $match: { createdBy: { $in: accessibleUserIds } } },
       {
         $group: {
           _id: '$category',
@@ -79,11 +115,16 @@ router.get('/categories', auth, async (req, res) => {
 // Get medicines by category
 router.get('/by-category/:category', auth, async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId);
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const category = req.params.category;
     
     const medicines = await Inventory.aggregate([
-      { $match: { createdBy: userId, category: category } },
+      { $match: { createdBy: { $in: accessibleUserIds }, category: category } },
       {
         $group: {
           _id: '$medicineName',
@@ -112,12 +153,17 @@ router.get('/by-category/:category', auth, async (req, res) => {
 // Get suppliers for a specific medicine
 router.get('/suppliers/:medicineName', auth, async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId);
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const medicineName = req.params.medicineName;
     
     // Find inventory items for this medicine with purchase info
     const inventoryItems = await Inventory.find({
-      createdBy: req.user.userId,
+      createdBy: { $in: accessibleUserIds },
       medicineName: { $regex: new RegExp('^' + medicineName + '$', 'i') }
     });
     
@@ -129,7 +175,7 @@ router.get('/suppliers/:medicineName', auth, async (req, res) => {
     // Find purchases to get supplier info
     const purchases = await Purchase.find({
       _id: { $in: purchaseIds },
-      createdBy: req.user.userId
+      createdBy: { $in: accessibleUserIds }
     });
     
     // Group by supplier
@@ -175,13 +221,18 @@ router.get('/suppliers/:medicineName', auth, async (req, res) => {
 // Get batch details for medicine + supplier combination
 router.get('/details/:medicineName', auth, async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId);
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const medicineName = req.params.medicineName;
     const supplierName = req.query.supplier;
     
     // Build query
     const query = {
-      createdBy: req.user.userId,
+      createdBy: { $in: accessibleUserIds },
       medicineName: { $regex: new RegExp('^' + medicineName + '$', 'i') }
     };
     
@@ -191,7 +242,7 @@ router.get('/details/:medicineName', auth, async (req, res) => {
     // If supplier specified, filter by purchase
     if (supplierName && supplierName !== 'Unknown') {
       const purchases = await Purchase.find({
-        createdBy: req.user.userId,
+        createdBy: { $in: accessibleUserIds },
         supplier: supplierName,
         medicineName: { $regex: new RegExp('^' + medicineName + '$', 'i') }
       });
@@ -230,6 +281,11 @@ router.get('/details/:medicineName', auth, async (req, res) => {
 // Add new inventory item
 router.post('/', auth, async (req, res) => {
   try {
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
     const item = new Inventory({
       ...req.body,
       createdBy: req.user.userId
@@ -244,8 +300,14 @@ router.post('/', auth, async (req, res) => {
 // Update inventory item
 router.put('/:id', auth, async (req, res) => {
   try {
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const item = await Inventory.findOneAndUpdate(
-      { _id: req.params.id, createdBy: req.user.userId },
+      { _id: req.params.id, createdBy: { $in: accessibleUserIds } },
       req.body,
       { new: true }
     );
@@ -259,9 +321,15 @@ router.put('/:id', auth, async (req, res) => {
 // Delete inventory item
 router.delete('/:id', auth, async (req, res) => {
   try {
+    // Restrict writers from accessing inventory
+    if (req.user.role === 'writer') {
+      return res.status(403).json({ message: 'Writers are not allowed to access inventory' });
+    }
+    
+    const accessibleUserIds = await getAccessibleUserIds(req.user.userId, req.user.role);
     const item = await Inventory.findOneAndDelete({ 
       _id: req.params.id, 
-      createdBy: req.user.userId 
+      createdBy: { $in: accessibleUserIds } 
     });
     if (!item) return res.status(404).json({ message: 'Item not found' });
     res.json({ message: 'Item deleted' });
